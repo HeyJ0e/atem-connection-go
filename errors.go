@@ -1,4 +1,4 @@
-package atemconn
+package atemconnection
 
 import (
 	"errors"
