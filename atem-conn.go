@@ -58,6 +58,10 @@ type atemConn struct {
 	closeCh        chan struct{}
 }
 
+func Dial(address string) (net.Conn, error) {
+	return DialContext(context.Background(), address)
+}
+
 func DialContext(ctx context.Context, address string) (net.Conn, error) {
 	if !strings.Contains(address, ":") {
 		address += ":" + strconv.Itoa(defaultPort)
