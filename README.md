@@ -63,7 +63,7 @@ func main() {
   cmd := make([]byte, 12)
   binary.BigEndian.PutUint16(cmd[0:], 12) // Command length
   copy(cmd[4:], "CAuS")                   // Command string
-  cmd[8] = 0x01 // Set mask
+  cmd[8] = 0x01                           // Set mask
   cmd[9] = 0x03                           // AUX channel 4
   binary.BigEndian.PutUint16(cmd[10:], 5) // Input 6
 
@@ -81,7 +81,7 @@ func main() {
 }
 ```
 
-## 📡 Protocol Details
+## 🔬 Protocol Details
 
 The ATEM protocol is a stateful system built on top of UDP. It includes:
 - Session handling and packet sequencing.
@@ -115,5 +115,21 @@ A single packet can include multiple commands, up to a maximum combined size of 
 | **Program Input** | `CPgI` | 4 bytes | `0`: M/E (uint8)<br>`1`: Reserved (?)<br>`2-3`: Source (uint16) |
 | **Preview Input** | `CPvI` | 4 bytes | `0`: M/E (uint8)<br>`1`: Reserved (?)<br>`2-3`: Source (uint16) |
 | **AUX Source**    | `CAuS` | 4 bytes | `0`: Set mask (0x01)<br>`1`: AUX channel (uint8)<br>`2-3`: Source (uint16) |
+
+### Decode Example
+
+```go
+func decode(b []byte) {
+	for len(b) > 0 {
+		l := int(binary.BigEndian.Uint16(b))
+		cmd := string(b[4:8])
+		data := b[8:l]
+
+		println("cmd: " + cmd + " data: `" + hex.EncodeToString(data) + "`")
+
+		b = b[l:]
+	}
+}
+```
 
 > 📝 **Note**: This package provides raw protocol access and does not parse, interpret, or define the full ATEM command set. Please refer to Blackmagic's community resources or reverse-engineered documentation for details on specific command structures.
