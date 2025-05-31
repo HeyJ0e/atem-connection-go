@@ -14,6 +14,7 @@ import (
 )
 
 const (
+	// ConnectHello is the first packet sent by the client to the ATEM switcher to initiate the connection.
 	ConnectHello      = "\x10\x14\x53\xab\x00\x00\x00\x00\x00\x3a\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00"
 	bufferSize        = 2048
 	maxQueueLen       = 8
@@ -23,7 +24,7 @@ const (
 	connectionTimeout = 5 * time.Second
 	maxPacketRetries  = 16
 	maxPacketPerAck   = 16
-	ackTolerance      = 1024 // any ack packet covers the last packets withing this tolerance
+	ackTolerance      = 1024 // any ack packet covers the last packets within this tolerance
 	defaultPort       = 9910
 )
 
@@ -58,10 +59,37 @@ type atemConn struct {
 	closeCh        chan struct{}
 }
 
+// Dial connects to an ATEM switcher at the specified address.
+//
+// The address must be in the form "host[:port]". If no port is specified,
+// the default port 9910 is used.
+//
+// Example:
+//
+//	conn, err := Dial("192.168.1.100")
+//	conn, err := Dial("192.168.1.110:9910")
+//
+// Dial uses [context.Background] internally. To provide a custom context,
+// use [DialContext] instead.
 func Dial(address string) (net.Conn, error) {
 	return DialContext(context.Background(), address)
 }
 
+// DialContext connects to the given address using the provided context.
+//
+// The context must be non-nil and is used only for establishing the connection.
+// It does not affect the connection after it has been established.
+//
+// The address must be in the form "host[:port]". If no port is specified,
+// the default port 9910 is used.
+//
+// Example:
+//
+//	deadline := time.Now().Add(3 * time.Second)
+//	ctx := context.WithDeadline(context.Background(), deadline)
+//	conn, err := DialContext(ctx, "192.168.1.100")
+//
+// If context control is not needed, use the [Dial] shorthand.
 func DialContext(ctx context.Context, address string) (net.Conn, error) {
 	if !strings.Contains(address, ":") {
 		address += ":" + strconv.Itoa(defaultPort)
@@ -166,6 +194,34 @@ func (a *atemConn) connect(ctx context.Context) error {
 	return checkErr(nil)
 }
 
+// Read reads the next payload from the ATEM connection into b buffer.
+//
+// This method implements the net.Conn interface. It returns only the command(s)
+// portion of the received ATEM packet. Multiple commands may be received
+// in a single payload.
+//
+// The session handling implemented inside [Read]. The ATEM expects the client
+// to regularly answer for ack requests. If [Read] is delayed or blocked
+// for too long, the ATEM switcher may close the session.
+//
+// The provided buffer b must be large enough to hold the entire payload
+// (up to [MaxPayloadSize]).
+//
+// It returns the number of bytes copied into b and any error encountered.
+// If the connection is already closed, ErrClosed is returned.
+//
+// Read may also return write-related errors if the internal session mechanism
+// detects a failure while responding to ATEM polling.
+//
+// Example:
+//
+//	// read to buffer
+//	buff := make([]byte, MaxPayloadSize)
+//	n, _ := conn.Read(buff)
+//	// extract first command data
+//	l := int(binary.BigEndian.Uint16(buff))
+//	cmd := string(buff[4:8])
+//	data := buff[8:l]
 func (a *atemConn) Read(b []byte) (int, error) {
 	if a.closed.Load() {
 		return 0, ErrClosed
@@ -272,6 +328,33 @@ func (a *atemConn) sendAck(id, sessionID uint16) error {
 	return err
 }
 
+// Write sends raw ATEM command(s) to the switcher.
+//
+// This method implements the net.Conn interface. The input slice b must contain
+// one or more complete and properly formatted ATEM commands, including length,
+// padding, command string, and payload.
+//
+// No validation is performed on the contents of b; the caller is responsible
+// for constructing valid ATEM command structures.
+//
+// Multiple commands can be sent in a single call, as long as the total size
+// does not exceed [MaxPayloadSize].
+//
+// Write returns the number of bytes sent, which will be equal to len(b)
+// or an error if the transmission fails.
+//
+// Example:
+//
+//	cmd := make([]byte, 12)
+//	binary.BigEndian.PutUint16(cmd[0:], 12) // Command length
+//	copy(cmd[4:], "CAuS")                   // Command string
+//	cmd[8] = 0x01                           // Set mask
+//	cmd[9] = 0x03                           // AUX channel 4
+//	binary.BigEndian.PutUint16(cmd[10:], 5) // Input 6
+//
+//	if _, err := conn.Write(cmd); err != nil {
+//		panic(err)
+//	}
 func (a *atemConn) Write(b []byte) (int, error) {
 	if a.closed.Load() {
 		return 0, ErrClosed
@@ -419,6 +502,11 @@ func (a *atemConn) resendFrom(id uint16) error {
 	return nil
 }
 
+// Close gracefully shuts down the ATEM connection.
+//
+// If the connection is already closed, it returns ErrClosed. Otherwise, it
+// performs cleanup by canceling all queued packets and closing the underlying
+// network connection.
 func (a *atemConn) Close() error {
 	if a.closed.Load() {
 		return ErrClosed
@@ -455,20 +543,38 @@ func isAcked(pktID, ackID uint16) bool {
 	return (pktID <= ackID) && (ackID-ackTolerance < pktID)
 }
 
+// LocalAddr returns the local network address of the underlying connection.
 func (a *atemConn) LocalAddr() net.Addr {
 	return a.conn.LocalAddr()
 }
+
+// RemoteAddr returns the remote network address of the underlying connection.
 func (a *atemConn) RemoteAddr() net.Addr {
 	return a.conn.RemoteAddr()
 }
+
+// SetDeadline sets the read and write deadlines for the connection.
+//
+// A zero value for t disables the deadlines. Note that the read deadline
+// has its own specific behavior — see [SetReadDeadline] for details.
 func (a *atemConn) SetDeadline(t time.Time) error {
 	a.readDeadline = t
 	return a.conn.SetDeadline(t)
 }
+
+// SetReadDeadline sets the deadline for future [Read] calls.
+//
+// A zero value for t means no deadline is set on the [Read] call itself.
+// However, the ATEM protocol still enforces its own timing requirements,
+// and blocking [Read] operations for too long may cause it to time out.
 func (a *atemConn) SetReadDeadline(t time.Time) error {
 	a.readDeadline = t
 	return a.conn.SetReadDeadline(t)
 }
+
+// SetWriteDeadline sets the deadline for future Write calls.
+//
+// A zero value for t means no write deadline is set.
 func (a *atemConn) SetWriteDeadline(t time.Time) error {
 	return a.conn.SetWriteDeadline(t)
 }

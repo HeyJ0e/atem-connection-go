@@ -5,34 +5,57 @@ import (
 	"strconv"
 )
 
+// PktFlag defines flags used in ATEM protocol packets.
+//
+// Multiple flags can be combined using bitwise OR.
 type PktFlag uint8
 
 const (
+	// AckRequest indicates that the packet expects an acknowledgment.
 	AckRequest PktFlag = 1 << iota
+
+	// NewSessionID signals that the sender is requesting or starting a new session.
 	NewSessionID
+
+	// IsResend marks the packet as a retransmission.
 	IsResend
+
+	// ResendRequest requests the receiver to resend missing packets.
 	ResendRequest
+
+	// AckReply is sent in response to AckRequest to confirm receipt.
 	AckReply
 )
 
 const (
+	// MaxPayloadSize is the maximum number of bytes allowed in the payload of a single packet.
 	MaxPayloadSize = maxPacketSize - headerLen
-	MaxPacketID    = 1 << 15
-	maxPacketSize  = 1416
-	headerLen      = 12
-	headerPad      = "\x00\x00\x00\x00\x00\x00"
-	ackOpNLen      = (uint16(AckReply) << 11) | headerLen // it'll be used a lot
+
+	// MaxPacketID is the maximum valid packet ID (15-bit range).
+	MaxPacketID = 1 << 15
+
+	maxPacketSize = 1416
+	headerLen     = 12
+	headerPad     = "\x00\x00\x00\x00\x00\x00"
+	ackOpNLen     = (uint16(AckReply) << 11) | headerLen // it'll be used a lot
 )
 
+// Packet represents a parsed ATEM protocol packet.
 type Packet struct {
-	Flags     PktFlag
-	ID        uint16
-	AckedID   uint16
-	ResendID  uint16
-	SessionID uint16
-	Payload   []byte
+	Flags     PktFlag // Flags indicating packet control information.
+	ID        uint16  // ID is the packet's unique identifier.
+	AckedID   uint16  // AckedID is the highest ID this packet acknowledges.
+	ResendID  uint16  // ResendID indicates which packet is requested for retransmission.
+	SessionID uint16  // SessionID identifies the communication session.
+	Payload   []byte  // Payload is the data carried by this packet.
 }
 
+// ParsePacket parses raw packet data into the given Packet struct.
+//
+// It returns an error if the packet is too short or the length header
+// does not match the actual length.
+//
+// The parsed data will be stored in the provided Packet pointer.
 func ParsePacket(data []byte, p *Packet) error {
 	if len(data) < headerLen {
 		return ErrTooShortMsg
@@ -57,6 +80,11 @@ func ParsePacket(data []byte, p *Packet) error {
 	return nil
 }
 
+// Write serializes the Packet into the provided buffer.
+//
+// The buffer must be large enough to hold the entire packet, including the header.
+// Returns the number of bytes written (equal to the payload length), or an error
+// if the buffer is too small.
 func (p *Packet) Write(buff []byte) (int, error) {
 	l := headerLen + uint16(len(p.Payload))
 	if uint16(len(buff)) < l {
@@ -83,6 +111,7 @@ func writeAck(id, sessID uint16, buff []byte) {
 	copy(buff[6:], headerPad)
 }
 
+// String returns a human-readable string representation of a packet.
 func (p *Packet) String() string {
 	return "Atem packet: flags[" + p.Flags.String() + "], " +
 		"ID:" + strconv.Itoa(int(p.ID)) +
@@ -92,6 +121,8 @@ func (p *Packet) String() string {
 		", len:" + strconv.Itoa(len(p.Payload))
 }
 
+// String returns a space-separated string representation of the packet flags.
+// For example: "ackReq isRetry ackReply"
 func (f PktFlag) String() string {
 	res := ""
 	if f&AckRequest > 0 {
