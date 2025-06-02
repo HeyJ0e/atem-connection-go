@@ -1,3 +1,5 @@
+// Package atemconnection provides low-level networking and protocol support
+// for communicating with Blackmagic Design ATEM switchers.
 package atemconnection
 
 import (
