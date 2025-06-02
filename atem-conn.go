@@ -33,7 +33,7 @@ type sentQueueItem struct {
 	packet    *Packet
 	sendCount atomic.Uint32
 	lastSent  atomic.Int64
-	ackErr    chan error
+	ackErrCh  chan error
 }
 
 type atemConn struct {
@@ -97,7 +97,7 @@ func DialContext(ctx context.Context, address string) (net.Conn, error) {
 	dialer := net.Dialer{}
 	conn, err := dialer.DialContext(ctx, "udp", address)
 	if err != nil {
-		return nil, err
+		return nil, newDialErr(err)
 	}
 
 	atemConn := newConn(conn)
@@ -159,14 +159,14 @@ func (a *atemConn) connect(ctx context.Context) error {
 
 	// send hello
 	if _, err := a.conn.Write([]byte(ConnectHello)); err != nil {
-		return checkErr(err)
+		return checkErr(newWriteErr(err))
 	}
 
 	// read hello
 	n, err := a.conn.Read(a.readBuffer)
 	if err != nil {
 		a.conn.Close()
-		return checkErr(ErrHandshake(err.Error()))
+		return checkErr(newHandshakeErr(err))
 	}
 
 	// parse hello
@@ -174,18 +174,18 @@ func (a *atemConn) connect(ctx context.Context) error {
 	err = ParsePacket(a.readBuffer[:n], &p)
 	if err != nil {
 		a.conn.Close()
-		return checkErr(ErrHandshake(err.Error()))
+		return checkErr(newHandshakeErr(err))
 	}
 	if p.Flags&NewSessionID == 0 {
 		a.conn.Close()
-		return checkErr(ErrHandshake("wrong packet flags"))
+		return checkErr(newHandshakeErr(ErrPacketFlags))
 	}
 	a.lastReadPkt.Store(uint32(p.ID))
 
 	// send ack
 	if err = a.sendAck(p.ID, p.SessionID); err != nil {
 		a.conn.Close()
-		return checkErr(ErrHandshake(err.Error()))
+		return checkErr(newHandshakeErr(err))
 	}
 
 	a.closed.Store(false)
@@ -239,6 +239,8 @@ func (a *atemConn) Read(b []byte) (int, error) {
 		if err != nil {
 			if a.closeErr != nil {
 				err = a.closeErr
+			} else {
+				err = newReadErr(err)
 			}
 			return n, err
 		}
@@ -262,9 +264,9 @@ func (a *atemConn) Read(b []byte) (int, error) {
 			a.lastAckedPkt.Store(uint32(p.AckedID))
 			for i := range a.sent {
 				if a.sent[i].inUse.Load() && isAcked(a.sent[i].packet.ID, p.AckedID) {
-					if a.sent[i].ackErr != nil {
-						close(a.sent[i].ackErr)
-						a.sent[i].ackErr = nil
+					if a.sent[i].ackErrCh != nil {
+						close(a.sent[i].ackErrCh)
+						a.sent[i].ackErrCh = nil
 					}
 				}
 			}
@@ -324,8 +326,11 @@ func (a *atemConn) sendAck(id, sessionID uint16) error {
 	defer a.ackLock.Unlock()
 
 	writeAck(id, sessionID, a.ackBuffer[:])
-	_, err := a.conn.Write(a.ackBuffer[:])
-	return err
+	if _, err := a.conn.Write(a.ackBuffer[:]); err != nil {
+		return newWriteErr(err)
+	}
+
+	return nil
 }
 
 // Write sends raw ATEM command(s) to the switcher.
@@ -368,7 +373,7 @@ func (a *atemConn) Write(b []byte) (int, error) {
 		if it.inUse.CompareAndSwap(false, true) {
 			it.sendCount.Store(0)
 			defer it.inUse.Store(false)
-			it.ackErr = make(chan error)
+			it.ackErrCh = make(chan error)
 
 			it.packet.Flags = AckRequest
 			it.packet.AckedID = 0
@@ -385,7 +390,7 @@ func (a *atemConn) Write(b []byte) (int, error) {
 			}
 
 			go a.checkForResend()
-			return n, <-it.ackErr
+			return n, <-it.ackErrCh
 		}
 	}
 
@@ -413,6 +418,9 @@ func (a *atemConn) write(p *Packet) (int, error) {
 	}
 
 	n, err = a.conn.Write(a.writeBuffer[:n+headerLen])
+	if err != nil {
+		err = newWriteErr(err)
+	}
 
 	return max(n-headerLen, 0), err
 }
@@ -486,10 +494,10 @@ func (a *atemConn) resendFrom(id uint16) error {
 		it := sent[i]
 
 		if it.inUse.Load() && it.sendCount.Load() > maxPacketRetries {
-			it.ackErr <- ErrTooManyRetries
-			if it.ackErr != nil {
-				close(it.ackErr)
-				it.ackErr = nil
+			it.ackErrCh <- ErrTooManyRetries
+			if it.ackErrCh != nil {
+				close(it.ackErrCh)
+				it.ackErrCh = nil
 			}
 		}
 
@@ -517,16 +525,16 @@ func (a *atemConn) Close() error {
 }
 
 func (a *atemConn) close(e error) {
-	ackErr := error(ErrClosed)
+	ackErr := ErrClosed
 	if e != nil {
 		ackErr = e
 	}
 
 	for _, it := range a.sent {
-		if it.inUse.Load() && it.ackErr != nil {
-			it.ackErr <- ackErr
-			close(it.ackErr)
-			it.ackErr = nil
+		if it.inUse.Load() && it.ackErrCh != nil {
+			it.ackErrCh <- ackErr
+			close(it.ackErrCh)
+			it.ackErrCh = nil
 		}
 	}
 
@@ -559,7 +567,7 @@ func (a *atemConn) RemoteAddr() net.Addr {
 // has its own specific behavior — see [SetReadDeadline] for details.
 func (a *atemConn) SetDeadline(t time.Time) error {
 	a.readDeadline = t
-	return a.conn.SetDeadline(t)
+	return wrapDeadlineErr(a.conn.SetDeadline(t))
 }
 
 // SetReadDeadline sets the deadline for future [Read] calls.
@@ -569,12 +577,12 @@ func (a *atemConn) SetDeadline(t time.Time) error {
 // and blocking [Read] operations for too long may cause it to time out.
 func (a *atemConn) SetReadDeadline(t time.Time) error {
 	a.readDeadline = t
-	return a.conn.SetReadDeadline(t)
+	return wrapDeadlineErr(a.conn.SetReadDeadline(t))
 }
 
 // SetWriteDeadline sets the deadline for future Write calls.
 //
 // A zero value for t means no write deadline is set.
 func (a *atemConn) SetWriteDeadline(t time.Time) error {
-	return a.conn.SetWriteDeadline(t)
+	return wrapDeadlineErr(a.conn.SetWriteDeadline(t))
 }
