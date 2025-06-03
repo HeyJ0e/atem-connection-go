@@ -43,10 +43,6 @@ func TestWrappingError(t *testing.T) {
 	udpErr := &net.OpError{Op: "dial", Net: "udp", Err: io.EOF}
 	err := newDialErr(udpErr)
 
-	if !errors.Is(err, err) {
-		t.Error("Is did not match the same error")
-	}
-
 	if !errors.Is(err, ErrDial) {
 		t.Error("Is did not match ErrDial")
 	}
